@@ -1,0 +1,182 @@
+use bitvec::prelude::*;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
+use serde::Serialize;
+use std::fs::File;
+use std::io::BufWriter;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+// CONFIGURATION
+const MAX_N: usize = 1_000_000; // Try 10_000_000 if you're feeling brave
+const BATCH_SIZE: usize = 5000; // Chunk size for Rayon
+
+#[derive(Debug, Serialize)]
+struct Record {
+    n: usize,
+    phi: usize,             // The theoretical symmetric count
+    valid_total: usize,     // Total valid configurations (a(n))
+    asymmetric: usize,      // The "Error" (a(n) - symmetric)
+    ratio: f64,             // Asymmetric / Total
+}
+
+fn main() {
+    let start_time = Instant::now();
+
+    // 1. Precompute Smallest Prime Factor (SPF) sieve
+    // This makes factorization O(log n) inside the hot loop.
+    println!("Generating Sieve up to {}...", MAX_N);
+    let spf = sieve(MAX_N);
+
+    // 2. Setup Progress Bar
+    let pb = ProgressBar::new(MAX_N as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({eta}) {msg}")
+        .unwrap());
+
+    // 3. Thread-safe CSV Writer
+    let file = File::create("centrifuge_data.csv").expect("Unable to create file");
+    let writer = Arc::new(Mutex::new(csv::Writer::from_writer(BufWriter::new(file))));
+
+    // 4. Parallel Processing
+    // We iterate in chunks to keep CPU caches warm and update the CSV incrementally
+    (2..=MAX_N)
+        .collect::<Vec<usize>>()
+        .par_chunks(BATCH_SIZE)
+        .for_each(|chunk| {
+            let mut local_records = Vec::with_capacity(chunk.len());
+
+            for &n in chunk {
+                let factors = get_prime_factors(n, &spf);
+                let phi = calculate_phi(n, &factors);
+                
+                // OPTIMIZATION:
+                // If distinct prime factors < 2, the Frobenius number is undefined/infinite
+                // or simply: you cannot form coprimes from a single prime factor p.
+                // Asymmetric count is ALWAYS 0 for Prime Powers.
+                if factors.len() < 2 {
+                    local_records.push(Record {
+                        n,
+                        phi,
+                        valid_total: (n + 1) - phi, // Symmetric only
+                        asymmetric: 0,
+                        ratio: 0.0,
+                    });
+                    continue;
+                }
+
+                // THE HOT PATH: Knapsack DP
+                // We use a bitset to track reachable sums.
+                // bitvec is fast, but for this specific "unbounded knapsack", 
+                // a simple boolean array logic is often autovectorized better by LLVM.
+                // Let's use a raw vector of bools or bitvec. 
+                // bitvec is chosen here for memory compactness (L2 cache friendly).
+                
+                let mut reachable = bitvec![u8, Lsb0; 0; n + 1];
+                reachable.set(0, true);
+
+                // Unbounded Knapsack:
+                // For each factor p, we can reach x if we could reach x-p.
+                // We iterate forward to allow using the item multiple times.
+                for &p in &factors {
+                    for i in p..=n {
+                        if reachable[i - p] {
+                            reachable.set(i, true);
+                        }
+                    }
+                }
+
+                // Count Asymmetric (valid AND gcd(k, n) == 1)
+                // We iterate 1..n. 
+                // Optimization: We only check k where gcd(k,n) == 1.
+                let mut asymmetric_count = 0;
+                
+                // We can't easily skip non-coprimes without checking gcd,
+                // but gcd is fast.
+                for k in 1..n {
+                    if reachable[k] {
+                        // Check the "Ishwar Condition": k and n-k must be valid.
+                        // Since `reachable` stores representable numbers:
+                        if reachable[n - k] {
+                             // It is a valid centrifuge configuration.
+                             // Now is it asymmetric?
+                             if gcd(k, n) == 1 {
+                                 asymmetric_count += 1;
+                             }
+                        }
+                    }
+                }
+
+                let symmetric_count = (n + 1) - phi;
+                let valid_total = symmetric_count + asymmetric_count;
+                
+                // Filter out boring 0 lines to save disk space? 
+                // User wants to see how ratio changes, so keep all or filter 0s.
+                // Let's keep all for the scatter plot.
+                
+                local_records.push(Record {
+                    n,
+                    phi,
+                    valid_total,
+                    asymmetric: asymmetric_count,
+                    ratio: asymmetric_count as f64 / valid_total as f64,
+                });
+            }
+
+            // Write chunk to disk safely
+            let mut w = writer.lock().unwrap();
+            for rec in local_records {
+                w.serialize(rec).unwrap();
+            }
+            pb.inc(chunk.len() as u64);
+        });
+
+    pb.finish_with_message("Done!");
+    println!("Processing complete in {:.2?}", start_time.elapsed());
+}
+
+// --- HELPERS ---
+
+fn sieve(limit: usize) -> Vec<usize> {
+    let mut spf: Vec<usize> = (0..=limit).collect();
+    let limit_sqrt = (limit as f64).sqrt() as usize;
+    for i in 2..=limit_sqrt {
+        if spf[i] == i {
+            for j in (i * i..=limit).step_by(i) {
+                if spf[j] == j {
+                    spf[j] = i;
+                }
+            }
+        }
+    }
+    spf
+}
+
+fn get_prime_factors(mut n: usize, spf: &[usize]) -> Vec<usize> {
+    let mut factors = Vec::new();
+    while n > 1 {
+        let p = spf[n];
+        factors.push(p);
+        while n % p == 0 {
+            n /= p;
+        }
+    }
+    factors
+}
+
+fn calculate_phi(n: usize, factors: &[usize]) -> usize {
+    let mut res = n;
+    for &p in factors {
+        res = res / p * (p - 1);
+    }
+    res
+}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
