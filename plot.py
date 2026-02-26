@@ -1,57 +1,44 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# 1. Load the data
-print("Loading CSV... (this might take a moment for large files)")
-try:
-    df = pd.read_csv("centrifuge_data.csv")
-except FileNotFoundError:
-    print("Error: 'centrifuge_data.csv' not found. Run the Rust program first!")
-    exit()
+# 1. Load Data
+print("Loading data...")
+df = pd.read_csv("centrifuge_data.csv")
 
-# Filter out rows where ratio is 0 to make the graph cleaner
-# (Ratio 0 means the number is a prime power or has < 2 distinct factors)
-df_filtered = df[df['ratio'] > 0]
+# 2. Calculate the specific ratio you asked for
+# The CSV 'ratio' is (Asymmetric / Total). 
+# If you specifically want (Asymmetric / Symmetric), we calculate it here:
+# Symmetric count = (n + 1) - phi
+symmetric_count = (df['n'] + 1) - df['phi']
+df['asym_vs_sym_ratio'] = df['asymmetric'] / symmetric_count
 
-print(f"Loaded {len(df)} records. Plotting {len(df_filtered)} non-zero records...")
+# 3. Create a Simple Line (Rolling Average)
+# We use a window of 50,000 to smooth out the noise of primes vs composite numbers.
+# This reveals the true global trend.
+WINDOW_SIZE = 50000 
+print(f"Calculating {WINDOW_SIZE}-point rolling average...")
 
-# 2. Setup the Plot
-plt.style.use('dark_background') # Looks better for dense mathematical scatter plots
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+# Option A: Plot Asymmetric / Total (The "Market Share" of asymmetry)
+df['trend_total'] = df['ratio'].rolling(window=WINDOW_SIZE).mean()
 
-# --- PLOT 1: The Ratio (The "Ghost" Pattern) ---
-# This shows Asymmetric / Total Valid. 
-# You should see horizontal bands corresponding to specific prime factor families.
-ax1.scatter(
-    df_filtered['n'], 
-    df_filtered['ratio'], 
-    s=0.5,          # Pixel size (keep small!)
-    c='cyan',       # Color
-    alpha=0.1,      # Transparency (0.1 = 10% opaque). Essential for 1M points.
-    linewidths=0    # No border on dots
-)
-ax1.set_ylabel("Asymmetry Ratio")
-ax1.set_title(f"Centrifuge Problem: Asymmetry Ratio (N={df['n'].max()})")
-ax1.grid(True, which='both', linestyle='--', linewidth=0.3, alpha=0.3)
+# Option B: Plot Asymmetric / Symmetric (Your specific request)
+df['trend_vs_sym'] = df['asym_vs_sym_ratio'].rolling(window=WINDOW_SIZE).mean()
 
-# --- PLOT 2: Raw Asymmetric Count ---
-# This shows the raw number of 'surprise' solutions.
-# You will likely see parabolic shapes or linear growth trends.
-ax2.scatter(
-    df_filtered['n'], 
-    df_filtered['asymmetric'], 
-    s=0.5, 
-    c='lime', 
-    alpha=0.1,
-    linewidths=0
-)
-ax2.set_xlabel("N (Number of Slots)")
-ax2.set_ylabel("Count of Asymmetric Solutions")
-ax2.grid(True, which='both', linestyle='--', linewidth=0.3, alpha=0.3)
+# 4. Plot
+plt.style.use('dark_background')
+plt.figure(figsize=(12, 6))
 
-# 3. Save and Show
+# Plotting Option A (Asymmetric % of Total). 
+# Change to 'trend_vs_sym' if you strictly want Asymmetric/Symmetric.
+plt.plot(df['n'], df['trend_total'], color='cyan', linewidth=2, label=f'Rolling Average (Window={WINDOW_SIZE})')
+
+plt.title(f"Trend: Ratio of Asymmetric Solutions (N={df['n'].max()})")
+plt.xlabel("N (Number of Slots)")
+plt.ylabel("Average Ratio (Asymmetric / Total Valid)")
+plt.grid(True, linestyle='--', alpha=0.3)
+plt.legend()
+
 plt.tight_layout()
-output_filename = "centrifuge_analysis.png"
-plt.savefig(output_filename, dpi=300)
-print(f"Plot saved to {output_filename}")
+plt.savefig("centrifuge_trend.png")
+print("Saved simple line plot to 'centrifuge_trend.png'")
 plt.show()
